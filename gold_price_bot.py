@@ -16,7 +16,7 @@ GOLD_API_KEY = os.environ.get("GOLD_API_KEY")
 
 GOLD_API_URL = "https://www.goldapi.io/api/XAU/USD"
 FX_API_URL = "https://api.frankfurter.dev/v1/latest"  # free, no API key
-GOLD_INFO_LINK = "https://harga-emas.org/"  # info harga emas harian (Indonesia)
+GOLD_INFO_LINK = "https://www.logammulia.com/id/grafik-harga-emas"  # info harga emas harian (Indonesia)
 
 
 def fetch_gold_price() -> dict:
