@@ -16,12 +16,19 @@ GOLD_API_KEY = os.environ.get("GOLD_API_KEY")
 
 GOLD_API_URL = "https://www.goldapi.io/api/XAU/USD"
 FX_API_URL = "https://api.frankfurter.dev/v1/latest"  # free, no API key
-GOLD_INFO_LINK = "https://www.logammulia.com/id/grafik-harga-emas"
+GOLD_INFO_LINK = "https://harga-emas.org/"  # info harga emas harian (Indonesia)
 OZ_TO_GRAM = 31.1034768  # 1 troy ounce = 31.1034768 gram
+
+# Sumber harga Antam resmi (community project, gratis, tanpa API key)
+# https://github.com/iamutaki/logam-mulia-api
+ANTAM_API_URL = "https://logam-mulia-api.iamutaki.workers.dev/api/prices/logammulia"
+ANTAM_HISTORY_URL = "https://logam-mulia-api.iamutaki.workers.dev/api/prices/logammulia/history"
+ANTAM_WEIGHT = 1  # gram, dijadikan acuan (harga per gram)
+ANTAM_MATERIAL_TYPE = "Emas Batangan"
 
 
 def fetch_gold_price() -> dict:
-    """Ambil harga emas terkini dari GoldAPI.io"""
+    """Ambil harga emas dunia terkini dari GoldAPI.io"""
     headers = {
         "x-access-token": GOLD_API_KEY,
         "Content-Type": "application/json",
@@ -39,7 +46,51 @@ def fetch_usd_idr_rate() -> float:
     return data["rates"]["IDR"]
 
 
-def format_message(data: dict, usd_idr: float) -> str:
+def fetch_antam_price() -> dict | None:
+    """
+    Ambil harga Antam resmi (1 gram, Emas Batangan) dari logam-mulia-api.
+    Return None kalau gagal/data tidak ditemukan -> caller harus fallback.
+    """
+    try:
+        resp = requests.get(ANTAM_API_URL, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+        if not payload.get("success"):
+            return None
+        for item in payload.get("data", []):
+            if (
+                item.get("weight") == ANTAM_WEIGHT
+                and item.get("materialType") == ANTAM_MATERIAL_TYPE
+            ):
+                return item
+    except (requests.RequestException, ValueError):
+        return None
+    return None
+
+
+def fetch_antam_yesterday_price(today_date: str) -> int | None:
+    """Ambil harga Antam hari sebelumnya (untuk hitung gap) dari endpoint history."""
+    try:
+        resp = requests.get(
+            ANTAM_HISTORY_URL,
+            params={
+                "weight": ANTAM_WEIGHT,
+                "materialType": ANTAM_MATERIAL_TYPE,
+                "length": 5,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        for rec in payload.get("data", []):
+            if rec.get("recordedDate") != today_date:
+                return rec.get("sellPrice")
+    except (requests.RequestException, ValueError):
+        return None
+    return None
+
+
+def format_message(data: dict, usd_idr: float, antam: dict | None) -> str:
     """Format data harga emas jadi pesan Telegram yang enak dibaca"""
     price_usd_oz = data.get("price")
     price_usd_gram = data.get("price_gram_24k")
@@ -75,9 +126,31 @@ def format_message(data: dict, usd_idr: float) -> str:
         else ""
     )
 
+    # --- Bagian harga Antam resmi (kalau berhasil diambil) ---
+    antam_section = ""
+    if antam:
+        antam_price = antam.get("sellPrice")
+        antam_date = antam.get("recordedDate")
+        antam_yesterday = fetch_antam_yesterday_price(antam_date)
+
+        antam_lines = [f"*Harga Antam Resmi (1 gram)*", f"Sekarang: Rp{antam_price:,.0f}"]
+        if antam_yesterday:
+            gap_antam = antam_price - antam_yesterday
+            arrow_antam = "🔺" if gap_antam >= 0 else "🔻"
+            antam_lines.append(f"Kemarin: Rp{antam_yesterday:,.0f}")
+            antam_lines.append(f"Gap: {arrow_antam} Rp{abs(gap_antam):,.0f}")
+        antam_lines.append(f"_(update: {antam_date}, sumber: logammulia.com)_")
+        antam_section = "\n".join(antam_lines) + "\n\n"
+    else:
+        antam_section = (
+            "*Harga Antam Resmi*\n"
+            "_Sumber Antam sedang tidak tersedia, tampil estimasi saja._\n\n"
+        )
+
     message = (
         f"🥇 *Update Harga Emas Dunia*\n"
         f"_{now}_\n\n"
+        f"{antam_section}"
         f"*Harga Internasional (XAU/USD)*\n"
         f"Sekarang: ${price_usd_oz:,.2f} / oz (${price_usd_gram:,.2f}/gram)\n"
         f"{prev_close_line}"
@@ -87,8 +160,8 @@ def format_message(data: dict, usd_idr: float) -> str:
         f"{prev_close_idr_line}"
         f"Gap: {arrow_idr} Rp{abs(change_idr_gram):,.0f}\n"
         f"Kurs: Rp{usd_idr:,.0f}/USD\n"
-        f"_(estimasi dari harga emas dunia, bukan harga resmi Antam —_\n"
-        f"_harga Antam biasanya lebih tinggi karena ada premium cetak & sertifikasi)_\n\n"
+        f"_(estimasi dari harga emas dunia, biasanya lebih rendah dari_\n"
+        f"_harga Antam resmi karena belum termasuk premium cetak & sertifikasi)_\n\n"
         f"[📈 Cek harga emas harian lainnya]({GOLD_INFO_LINK})"
     )
     return message
@@ -123,7 +196,8 @@ def main():
     try:
         data = fetch_gold_price()
         usd_idr = fetch_usd_idr_rate()
-        message = format_message(data, usd_idr)
+        antam = fetch_antam_price()  # None kalau gagal -> pesan tetap terkirim tanpa data Antam
+        message = format_message(data, usd_idr, antam)
         send_telegram_message(message)
         print("Berhasil kirim update harga emas.")
     except requests.RequestException as e:
