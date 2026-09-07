@@ -16,7 +16,8 @@ GOLD_API_KEY = os.environ.get("GOLD_API_KEY")
 
 GOLD_API_URL = "https://www.goldapi.io/api/XAU/USD"
 FX_API_URL = "https://api.frankfurter.dev/v1/latest"  # free, no API key
-GOLD_INFO_LINK = "https://www.logammulia.com/id/grafik-harga-emas"  # info harga emas harian (Indonesia)
+GOLD_INFO_LINK = "https://www.logammulia.com/id/grafik-harga-emas"
+OZ_TO_GRAM = 31.1034768  # 1 troy ounce = 31.1034768 gram
 
 
 def fetch_gold_price() -> dict:
@@ -42,13 +43,19 @@ def format_message(data: dict, usd_idr: float) -> str:
     """Format data harga emas jadi pesan Telegram yang enak dibaca"""
     price_usd_oz = data.get("price")
     price_usd_gram = data.get("price_gram_24k")
+    prev_close_oz = data.get("prev_close_price")  # harga penutupan kemarin, dari GoldAPI
     change_usd = data.get("ch") or 0
     change_pct = data.get("chp") or 0
 
+    # Harga kemarin (per gram), dari prev_close_price (per troy ounce)
+    prev_close_gram = prev_close_oz / OZ_TO_GRAM if prev_close_oz else None
+
     # Estimasi konversi ke Rupiah (harga emas dunia murni, BUKAN harga resmi Antam)
     price_idr_gram = price_usd_gram * usd_idr
-    change_usd_gram = price_usd_gram * (change_pct / 100) if price_usd_gram else 0
-    change_idr_gram = change_usd_gram * usd_idr
+    prev_close_idr_gram = prev_close_gram * usd_idr if prev_close_gram else None
+    change_idr_gram = (
+        price_idr_gram - prev_close_idr_gram if prev_close_idr_gram else 0
+    )
 
     # Waktu WIB (UTC+7)
     wib = timezone(timedelta(hours=7))
@@ -57,16 +64,28 @@ def format_message(data: dict, usd_idr: float) -> str:
     arrow = "🔺" if change_usd >= 0 else "🔻"
     arrow_idr = "🔺" if change_idr_gram >= 0 else "🔻"
 
+    prev_close_line = (
+        f"Kemarin: ${prev_close_oz:,.2f} / oz (${prev_close_gram:,.2f}/gram)\n"
+        if prev_close_oz
+        else ""
+    )
+    prev_close_idr_line = (
+        f"Kemarin: Rp{prev_close_idr_gram:,.0f} / gram\n"
+        if prev_close_idr_gram
+        else ""
+    )
+
     message = (
         f"🥇 *Update Harga Emas Dunia*\n"
         f"_{now}_\n\n"
         f"*Harga Internasional (XAU/USD)*\n"
-        f"${price_usd_oz:,.2f} / troy ounce\n"
-        f"${price_usd_gram:,.2f} / gram (24k)\n"
-        f"Perubahan: {arrow} {change_usd:+.2f} ({change_pct:+.2f}%)\n\n"
-        f"*Estimasi dalam Rupiah*\n"
-        f"Rp{price_idr_gram:,.0f} / gram (24k)\n"
-        f"Perubahan: {arrow_idr} Rp{abs(change_idr_gram):,.0f}\n"
+        f"Sekarang: ${price_usd_oz:,.2f} / oz (${price_usd_gram:,.2f}/gram)\n"
+        f"{prev_close_line}"
+        f"Gap: {arrow} {change_usd:+.2f} ({change_pct:+.2f}%)\n\n"
+        f"*Estimasi dalam Rupiah (per gram, 24k)*\n"
+        f"Sekarang: Rp{price_idr_gram:,.0f}\n"
+        f"{prev_close_idr_line}"
+        f"Gap: {arrow_idr} Rp{abs(change_idr_gram):,.0f}\n"
         f"Kurs: Rp{usd_idr:,.0f}/USD\n"
         f"_(estimasi dari harga emas dunia, bukan harga resmi Antam —_\n"
         f"_harga Antam biasanya lebih tinggi karena ada premium cetak & sertifikasi)_\n\n"
