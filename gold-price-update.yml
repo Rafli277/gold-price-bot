@@ -1,0 +1,30 @@
+name: Gold Price Update
+
+on:
+  schedule:
+    # Setiap 2 jam (UTC). GitHub Actions cron tidak dijamin presisi ke menit,
+    # bisa telat beberapa menit saat traffic tinggi.
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}  # trigger manual dari tab Actions untuk testing
+
+jobs:
+  send-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run gold price bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOLD_API_KEY: ${{ secrets.GOLD_API_KEY }}
+        run: python gold_price_bot.py
