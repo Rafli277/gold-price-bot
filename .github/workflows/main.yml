@@ -4,7 +4,7 @@ on:
   schedule:
     # Setiap 2 jam (UTC). GitHub Actions cron tidak dijamin presisi ke menit,
     # bisa telat beberapa menit saat traffic tinggi.
-    - cron: "* * * * *"
+    - cron: "*/5 * * * *"
   # workflow_dispatch: {}  # trigger manual dari tab Actions untuk testing
 
 jobs:
