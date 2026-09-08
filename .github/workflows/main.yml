@@ -1,18 +1,17 @@
 name: Gold Price Update
 
 on:
-  workflow_dispatch:
-
   schedule:
-    - cron: '17,39 * * * *'
-
-  push:
-    branches: [ main ]
+    # Setiap 2 jam (UTC), tepat di menit ke-0. GitHub Actions cron tidak
+    # dijamin presisi ke menit, bisa telat beberapa menit saat traffic tinggi.
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}       # trigger manual dari tab Actions, ATAU dari webhook /info
+  repository_dispatch:        # trigger dari luar (Cloudflare Worker) via GitHub API
+    types: [telegram-info]
 
 jobs:
   send-update:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4

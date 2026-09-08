@@ -61,15 +61,26 @@ def fetch_usd_idr_frankfurter() -> float | None:
         return None
 
 
+MIN_PLAUSIBLE_USD_IDR = 8_000
+MAX_PLAUSIBLE_USD_IDR = 25_000
+
+
 def _extract_rate(item: dict) -> float | None:
-    """Cari field kurs dari item kursdolar, karena format persisnya belum diverifikasi manual."""
-    for key in ("sellPrice", "rate", "price", "value"):
+    """
+    Cari field kurs dari item kursdolar, dan HANYA terima kalau nilainya masuk akal
+    sebagai kurs USD/IDR (8.000-25.000). Ini guard karena field JSON persisnya
+    belum diverifikasi manual -> mencegah bug seperti "Rp882,000/USD" (field yang
+    ke-parse ternyata bukan rate, misal harga emas per gram ikut ke-ambil).
+    """
+    for key in ("rate", "price", "sellPrice", "value"):
         val = item.get(key)
         if val:
             try:
-                return float(val)
+                rate = float(val)
             except (TypeError, ValueError):
                 continue
+            if MIN_PLAUSIBLE_USD_IDR <= rate <= MAX_PLAUSIBLE_USD_IDR:
+                return rate
     return None
 
 
@@ -111,14 +122,19 @@ def fetch_kursdolar_yesterday(today_date: str) -> float | None:
     return None
 
 
-def resolve_usd_idr() -> tuple[float, str]:
-    """Ambil kurs terbaik yang tersedia. Return (rate, sumber_label)."""
+def resolve_usd_idr() -> dict:
+    """Ambil kurs terbaik yang tersedia (+ kurs kemarin kalau ada). Return dict."""
     kursdolar = fetch_kursdolar()
     if kursdolar:
-        return kursdolar["rate"], "kursdolar"
+        yesterday = fetch_kursdolar_yesterday(kursdolar.get("recordedDate"))
+        return {
+            "rate": kursdolar["rate"],
+            "yesterday": yesterday,
+            "source": "kursdolar",
+        }
     rate = fetch_usd_idr_frankfurter()
     if rate:
-        return rate, "Frankfurter (fallback)"
+        return {"rate": rate, "yesterday": None, "source": "Frankfurter (fallback)"}
     raise RuntimeError("Semua sumber kurs USD/IDR gagal diambil")
 
 
@@ -162,37 +178,65 @@ def fetch_local_gold_yesterday(
     return None
 
 
-def build_local_gold_section(label: str, source: str, material_type: str, weight: float) -> str:
-    """Bangun satu blok teks (Sekarang/Kemarin/Gap) untuk satu sumber harga lokal."""
+def get_local_gold_row(label: str, source: str, material_type: str, weight: float) -> dict:
+    """Ambil satu baris data (Sekarang/Kemarin/Gap) untuk satu sumber harga lokal."""
     item = fetch_local_gold_price(source, material_type, weight)
     if not item:
-        return f"*{label}*\n_Data tidak tersedia saat ini._\n\n"
+        return {"label": label, "now": None, "yesterday": None}
 
     price = item.get("sellPrice")
     date = item.get("recordedDate")
     yesterday = fetch_local_gold_yesterday(source, material_type, weight, date)
+    return {"label": label, "now": price, "yesterday": yesterday, "date": date}
 
-    lines = [f"*{label} ({weight:g} gram)*", f"Sekarang: Rp{price:,.0f}"]
-    if yesterday:
-        gap = price - yesterday
-        arrow = "🔺" if gap >= 0 else "🔻"
-        lines.append(f"Kemarin: Rp{yesterday:,.0f}")
-        lines.append(f"Gap: {arrow} Rp{abs(gap):,.0f}")
-    lines.append(f"_(update: {date})_")
-    return "\n".join(lines) + "\n\n"
+
+def _fmt_rp(value) -> str:
+    return f"Rp{value:,.0f}" if value is not None else "N/A"
+
+
+def _fmt_gap(now, yesterday) -> str:
+    if now is None or yesterday is None:
+        return "-"
+    gap = now - yesterday
+    arrow = "▲" if gap >= 0 else "▼"
+    return f"{arrow}{abs(gap):,.0f}"
+
+
+def build_price_table(rows: list[dict]) -> str:
+    """Bangun tabel monospace (Sumber | Sekarang | Kemarin | Gap) untuk Telegram."""
+    headers = ["Sumber", "Sekarang", "Kemarin", "Gap"]
+    table_rows = []
+    for r in rows:
+        table_rows.append(
+            [r["label"], _fmt_rp(r["now"]), _fmt_rp(r["yesterday"]), _fmt_gap(r["now"], r["yesterday"])]
+        )
+
+    all_rows = [headers] + table_rows
+    col_widths = [max(len(row[i]) for row in all_rows) for i in range(4)]
+
+    def fmt_row(row):
+        return "  ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
+
+    lines = [fmt_row(headers), "-" * (sum(col_widths) + 6)]
+    lines += [fmt_row(r) for r in table_rows]
+    return "```\n" + "\n".join(lines) + "\n```"
 
 
 # ---------------------------------------------------------------------------
 # Format pesan
 # ---------------------------------------------------------------------------
 
-def format_message(data: dict, usd_idr: float, usd_idr_source: str) -> str:
-    """Format data harga emas jadi pesan Telegram yang enak dibaca"""
+def format_message(data: dict, fx: dict) -> str:
+    """Format data harga emas jadi pesan Telegram yang enak dibaca, pakai tabel monospace"""
     price_usd_oz = data.get("price")
     price_usd_gram = data.get("price_gram_24k")
     prev_close_oz = data.get("prev_close_price")  # dari GoldAPI
     change_usd = data.get("ch") or 0
     change_pct = data.get("chp") or 0
+
+    usd_idr = fx["rate"]
+    usd_idr_yesterday = fx.get("yesterday")
+    usd_idr_source = fx["source"]
 
     prev_close_gram = prev_close_oz / OZ_TO_GRAM if prev_close_oz else None
     price_idr_gram = price_usd_gram * usd_idr
@@ -214,16 +258,20 @@ def format_message(data: dict, usd_idr: float, usd_idr_source: str) -> str:
         f"Kemarin: Rp{prev_close_idr_gram:,.0f} / gram\n" if prev_close_idr_gram else ""
     )
 
-    # Bagian harga lokal: Antam, UBS, Galeri 24
-    local_sections = "".join(
-        build_local_gold_section(label, source, material_type, weight)
+    # Baris-baris tabel: Antam, UBS, Galeri 24, + Kurs USD/IDR
+    rows = [
+        get_local_gold_row(label, source, material_type, weight)
         for label, source, material_type, weight in GOLD_SOURCES
-    )
+    ]
+    rows.append({"label": "Kurs USD/IDR", "now": usd_idr, "yesterday": usd_idr_yesterday})
+    table = build_price_table(rows)
 
     message = (
         f"🥇 *Update Harga Emas Dunia*\n"
         f"_{now}_\n\n"
-        f"{local_sections}"
+        f"*Harga Lokal (per 1 gram, kecuali Kurs)*\n"
+        f"{table}\n"
+        f"_(sumber kurs: {usd_idr_source})_\n\n"
         f"*Harga Internasional (XAU/USD)*\n"
         f"Sekarang: ${price_usd_oz:,.2f} / oz (${price_usd_gram:,.2f}/gram)\n"
         f"{prev_close_line}"
@@ -232,7 +280,6 @@ def format_message(data: dict, usd_idr: float, usd_idr_source: str) -> str:
         f"Sekarang: Rp{price_idr_gram:,.0f}\n"
         f"{prev_close_idr_line}"
         f"Gap: {arrow_idr} Rp{abs(change_idr_gram):,.0f}\n"
-        f"Kurs: Rp{usd_idr:,.0f}/USD _(sumber: {usd_idr_source})_\n"
         f"_(estimasi dari harga emas dunia, biasanya lebih rendah dari harga_\n"
         f"_lokal resmi karena belum termasuk premium cetak & sertifikasi)_"
     )
@@ -267,8 +314,8 @@ def main():
 
     try:
         data = fetch_gold_price()
-        usd_idr, usd_idr_source = resolve_usd_idr()
-        message = format_message(data, usd_idr, usd_idr_source)
+        fx = resolve_usd_idr()
+        message = format_message(data, fx)
         send_telegram_message(message)
         print("Berhasil kirim update harga emas.")
     except requests.RequestException as e:
